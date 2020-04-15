@@ -1,28 +1,172 @@
 ---
-title: "speed-and-distance"
-output: html_document
+title: "Predicting Prices of Airbnbs Using ML"
+author: "Venkat Somala"
+knit: (function(input_file, encoding) {
+  out_dir <- 'docs';
+  rmarkdown::render(input_file,
+ encoding=encoding,
+ output_file=file.path(dirname(input_file), out_dir, 'index.html'))})
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+## Part 0: Overview and Objectives
+
+The ultimate goal of our analysis will be to build a predictive model of price and to understand the listing features with which this might be associated. 
+
+Specifically:
+
+  How accurately can we predict the price of an Airbnb listing by its features? Not only might this information help Airbnb, it might help new     listers with guidance on how much they might charge.
+
+  What makes some listings more expensive than others?!
+
+Airbnb has publicly available data on its listings. We’ll focus on Airbnb listings in New York City. To this end, you can find data on nearly 45,000 listings.
+
+The data above indicate the specific neighborhood in which each listing resides. There are 217 such neighborhoods. We’ll simplify our analysis by lumping these 217 neighborhoods into the corresponding 5 boroughs (eg: Brooklyn, Queens). The following data set summarizes the correspondence between neighborhood and borough.
+
+## Part 1: Ready the data
+
+```{r message=FALSE}
+library(ggplot2)
+library(dplyr)
+library(caret)
+library(ggridges)
 ```
 
-## R Markdown
-
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
-
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
-
-```{r cars}
-summary(cars)
+```{r}
+airbnb <- read.csv("NYC_airbnb_kaggle_copy.csv")
+NYC_nbd <- read.csv("NYC_nbhd_kaggle_copy.csv")
 ```
 
-## Including Plots
-
-You can also embed plots, for example:
-
-```{r pressure, echo=FALSE}
-plot(pressure)
+```{r}
+#head(airbnb)
+#head(NYC_nbd)
+dim(airbnb)
+dim(NYC_nbd)
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+```{r, warning=FALSE}
+airbnb_new <- left_join(airbnb, NYC_nbd, by = c("neighbourhood_cleansed"="neighbourhood"))
+impute_info <- airbnb_new %>%
+  preProcess(method = "knnImpute")
+airbnb_new <- predict(impute_info, newdata = airbnb_new)
+sum(complete.cases(airbnb_new)) 
+#head(airbnb_new, 2)
+```
+
+```{r, warning=FALSE}
+airbnb_slim <- airbnb_new %>%
+  select(-c(id, latitude, longitude, is_location_exact, neighbourhood_cleansed, amenities)) %>%
+  filter(price < 1000) %>%
+  sample_n(5000)
+  
+dim(airbnb_slim)
+head(airbnb_slim, 2)
+```
+
+We took out variables that were not relevant to predict the price. We did not think that ID, latitude, longitude, the exact location categoriacal, or amenities were important in determing price. We believe that taking these variables out could have also potentionally saved the model form homogeneity. We believe that taking these variables out will allow us to have a clearer data set. 
+
+
+
+## Part 2: Analyze
+
+We used KNN-model and lasso-model to predict the price from 25 predictors in the dataset. 
+
+We dealt with the missing data by imputing the original data. This may lead to an overly optimistic modeling. Some missing data are missing as N/A, which may be identified as a separate variable during the modeling process.
+
+Due to the nature of the data, a non parametric model like GAM would not be suitable. We found that our best models were KNN and lasso based. The models both have decent residual plots, and similar `$R^2$ and MAE values. KNN has a slightly lower MAE, and lasso has a slightly higher $R^2$. Whichever model is "best" would depend on which you value more in your models. 
+#### Lasso
+```{r}
+lambda_grid <- 10^seq(-3, 1, length = 100)
+set.seed(253)
+lassoairbnb <- train(
+  price ~ .,
+  data = airbnb_slim,
+  method = "glmnet",
+  trControl = trainControl(method = "cv", number = 10, selectionFunction = "oneSE"),
+  tuneGrid = data.frame(alpha = 1, lambda = lambda_grid),
+  metric = "MAE",
+  na.action = na.omit
+)
+```
+
+```{r}
+plot(lassoairbnb)
+```
+
+```{r}
+plot(lassoairbnb$finalModel, xvar = "lambda", label = TRUE, col = rainbow(20))
+```
+
+```{r}
+lassoairbnb$results %>% filter (lambda == lassoairbnb$bestTune$lambda )
+model_coef <- coef(lassoairbnb$finalModel, lassoairbnb$bestTune$lambda)
+predictors <- model_coef@Dimnames[[1]][model_coef@i + 1][-1]
+```
+
+```{r}
+result_df <- data.frame(resid = resid(lassoairbnb), fitted = fitted(lassoairbnb))
+# Residual plot
+ggplot(result_df, aes(x = fitted, y = resid)) + 
+  geom_point() + 
+  geom_hline(yintercept = 0)
+```
+
+```{r}
+coef(lassoairbnb$finalModel, lassoairbnb$bestTune$lambda)
+```
+
+#### KNN
+
+We took out some categorical variables with many categories because our KNN model was crushing. 
+
+```{r}
+airbnb_slim <- airbnb_slim %>%
+  select(-c(host_response_time, host_response_rate, calendar_updated)) 
+```
+
+
+```{r, warning=FALSE}
+    knn_model_3 <- train(
+      price ~ .,
+      data = airbnb_slim,
+      preProcess = c("center","scale"),
+      method = "knn",
+      #tuneGrid = data.frame(k = c(1, 5, 10, 11:39, seq(40, 200, by = 20))),
+      tuneGrid = data.frame(k = c(1, 5)),
+      trControl = trainControl(method = "cv", number = 10, selectionFunction = "best"),
+      metric = "MAE",
+      na.action = na.omit
+    )
+```
+
+```{r}
+# Examine results
+plot(knn_model_3)
+knn_model_3$bestTune
+knn_model_3$results %>% 
+  filter(k == knn_model_3$bestTune$k)
+```
+
+```{r}
+knn_model_3
+```
+
+```{r}
+result_knn <- data.frame(resid = resid(knn_model_3), fitted = fitted(knn_model_3))
+# Residual plot
+ggplot(result_knn, aes(x = fitted, y = resid)) + 
+  geom_point() + 
+  geom_hline(yintercept = 0)
+```
+
+
+## Part 3: Summarize
+
+Studying the relationship between price and square feet:
+
+Looking at our the predictor coeficients in our model, we noticed that square feet is the main driver/indicator of price. The coeficient for square footage is 0.33841943 which means that price goes up $0.338 for every 1 increase in square feet. Relative to the other predictors, it seems that square feet drives the price of an airbnb listing. 
+
+Many of the predictors left in our model like "neighbourhood_groupManhattan" are cateogrical variables and have smaller coefficients than square feet which means their effect is dwarfed compared to square feet.
+
+It makes sense that square feet and price have a strong and positive correlation with each other. Especially in New York City, the main factor that determines the value of a property is the amount of space. Since we are only comparing listings that are all within New York, location doesn't have as large of an effect as square feet which is why the only location oriented variable not ommited in our model is "neighbourhood_groupManhattan". If we had listings from both rural Minnesota and downtown New York, then we can imagine location being a much stronger predictor of price. 
+
+We can focus on two listings in the data set (id # 738588 & 259946) to see how square feet affects prices. The first has a price of $625 with a square footage of 3700 and the second listing is listed at 125 with a sqaure footage of 700. From comparing these two, we see that price and square footage are strongly and positively correlated with each other.
